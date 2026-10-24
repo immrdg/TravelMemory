@@ -1,0 +1,17 @@
+const adminDb = db.getSiblingDB("admin");
+if (!adminDb.getUser({{ mongodb_admin_user | to_json }})) {
+  adminDb.createUser({
+    user: {{ mongodb_admin_user | to_json }},
+    pwd: {{ mongodb_admin_password | to_json }},
+    roles: [{ role: "root", db: "admin" }]
+  });
+}
+
+const appDb = db.getSiblingDB({{ mongodb_db_name | to_json }});
+if (!appDb.getUser({{ mongodb_app_user | to_json }})) {
+  appDb.createUser({
+    user: {{ mongodb_app_user | to_json }},
+    pwd: {{ mongodb_app_password | to_json }},
+    roles: [{ role: "readWrite", db: {{ mongodb_db_name | to_json }} }]
+  });
+}
