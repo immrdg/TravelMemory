@@ -1,0 +1,17 @@
+# ---- Application ----
+app_repo_url: https://github.com/immrdg/TravelMemory.git
+app_repo_version: main
+app_user: travelmemory
+app_dir: /opt/travelmemory
+backend_port: 3001
+frontend_root: /var/www/travelmemory
+node_major: 20
+
+# ---- MongoDB ----
+mongodb_version: "7.0"
+mongodb_port: 27017
+mongodb_db_name: travelmemory
+mongodb_admin_user: dbadmin
+mongodb_admin_password: "{{ vault_mongodb_admin_password }}"
+mongodb_app_user: travelapp
+mongodb_app_password: "{{ vault_mongodb_app_password }}"

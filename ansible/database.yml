@@ -1,0 +1,131 @@
+---
+- name: Install and secure MongoDB
+  hosts: db
+  become: true
+  tags: [database]
+
+  vars:
+    mongodb_auth_enabled: true
+    mongodb_bind_ip: "127.0.0.1,{{ db_private_ip }}"
+    bootstrap_marker: /var/lib/mongodb/.users_bootstrapped
+
+  tasks:
+    - name: Add MongoDB signing key
+      ansible.builtin.get_url:
+        url: "https://www.mongodb.org/static/pgp/server-{{ mongodb_version }}.asc"
+        dest: "/usr/share/keyrings/mongodb-server-{{ mongodb_version }}.asc"
+        mode: "0644"
+
+    - name: Add MongoDB apt repository
+      ansible.builtin.deb822_repository:
+        name: "mongodb-org-{{ mongodb_version }}"
+        types: [deb]
+        uris: https://repo.mongodb.org/apt/ubuntu
+        suites: ["{{ ansible_distribution_release }}/mongodb-org/{{ mongodb_version }}"]
+        components: [multiverse]
+        architectures: [amd64, arm64]
+        signed_by: "/usr/share/keyrings/mongodb-server-{{ mongodb_version }}.asc"
+        state: present
+
+    - name: Install MongoDB
+      ansible.builtin.apt:
+        name: mongodb-org
+        state: present
+        update_cache: true
+
+    - name: Enable mongod
+      ansible.builtin.service:
+        name: mongod
+        enabled: true
+
+    - name: Check whether users were already created
+      ansible.builtin.stat:
+        path: "{{ bootstrap_marker }}"
+      register: marker
+
+    # First run only: start on localhost with auth off, create users, then lock down.
+    - name: Bootstrap admin and application users
+      when: not marker.stat.exists
+      block:
+        - name: Bootstrap config (localhost only, auth temporarily off)
+          ansible.builtin.template:
+            src: mongod.conf.j2
+            dest: /etc/mongod.conf
+            owner: root
+            group: root
+            mode: "0644"
+          vars:
+            mongodb_auth_enabled: false
+            mongodb_bind_ip: "127.0.0.1"
+
+        - name: Restart mongod with bootstrap config
+          ansible.builtin.service:
+            name: mongod
+            state: restarted
+
+        - name: Wait for mongod on localhost
+          ansible.builtin.wait_for:
+            host: 127.0.0.1
+            port: "{{ mongodb_port }}"
+            timeout: 60
+
+        - name: Create admin and application users
+          ansible.builtin.command: mongosh --quiet
+          args:
+            stdin: "{{ lookup('ansible.builtin.template', 'create_users.js.j2') }}"
+          no_log: true
+          changed_when: true
+
+        - name: Record that users exist
+          ansible.builtin.file:
+            path: "{{ bootstrap_marker }}"
+            state: touch
+            mode: "0600"
+            owner: mongodb
+            group: mongodb
+
+    - name: Final config (auth enabled, bound to private IP)
+      ansible.builtin.template:
+        src: mongod.conf.j2
+        dest: /etc/mongod.conf
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Restart mongod
+
+    - name: Apply config now
+      ansible.builtin.meta: flush_handlers
+
+    - name: Ensure mongod is running
+      ansible.builtin.service:
+        name: mongod
+        state: started
+
+    - name: Wait for mongod
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: "{{ mongodb_port }}"
+        timeout: 60
+
+    - name: Verify unauthenticated access is rejected
+      ansible.builtin.command:
+        argv: [mongosh, --quiet, --eval, "db.adminCommand({listDatabases: 1})"]
+      register: anon
+      failed_when: anon.rc == 0
+      changed_when: false
+
+    - name: Verify the application user can authenticate
+      ansible.builtin.command: >
+        mongosh --quiet
+        "mongodb://{{ mongodb_app_user | urlencode }}:{{ mongodb_app_password | urlencode }}@127.0.0.1:{{ mongodb_port }}/{{ mongodb_db_name }}?authSource={{ mongodb_db_name }}"
+        --eval "db.runCommand({ping: 1}).ok"
+      register: appauth
+      failed_when: "'1' not in appauth.stdout"
+      changed_when: false
+      no_log: true
+
+  handlers:
+    - name: Restart mongod
+      ansible.builtin.service:
+        name: mongod
+        state: restarted

@@ -1,0 +1,3 @@
+ufw_allow_rules:
+  - { port: "22", src: "{{ web_private_ip }}", comment: "SSH from web server (bastion)" }
+  - { port: "{{ mongodb_port }}", src: "{{ web_private_ip }}", comment: "MongoDB from web server" }

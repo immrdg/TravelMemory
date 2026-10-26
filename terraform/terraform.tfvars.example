@@ -1,0 +1,4 @@
+aws_region       = "us-east-1"
+allowed_ssh_cidr = "203.0.113.7/32" # your IP: curl -s https://checkip.amazonaws.com
+public_key_path  = "~/.ssh/id_ed25519.pub"
+private_key_path = "~/.ssh/id_ed25519"
