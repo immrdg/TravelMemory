@@ -1,0 +1,3 @@
+ufw_allow_rules:
+  - { port: "22", src: "{{ ssh_allowed_cidr }}", comment: "SSH from admin IP" }
+  - { port: "80", src: "any", comment: "HTTP" }

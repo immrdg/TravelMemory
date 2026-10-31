@@ -132,3 +132,11 @@ dist
 
 # Uploaded images
 backend/uploads/
+
+# Deployment state and local secrets
+terraform/.terraform/
+terraform/*.tfstate
+terraform/*.tfstate.*
+terraform/terraform.tfvars
+ansible/inventory.ini
+ansible/group_vars/all/vault.yml

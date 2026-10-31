@@ -1,0 +1,199 @@
+---
+- name: Deploy the MERN application
+  hosts: web
+  become: true
+  tags: [web]
+
+  vars:
+    mongo_uri: "mongodb://{{ mongodb_app_user | urlencode }}:{{ mongodb_app_password | urlencode }}@{{ db_private_ip }}:{{ mongodb_port }}/{{ mongodb_db_name }}?authSource={{ mongodb_db_name }}"
+
+  tasks:
+    # ---------- Node.js / NPM ----------
+    - name: Create apt keyring directory
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: "0755"
+
+    - name: Add NodeSource signing key
+      ansible.builtin.shell: |
+        set -o pipefail
+        curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg
+      args:
+        executable: /bin/bash
+        creates: /etc/apt/keyrings/nodesource.gpg
+
+    - name: Add NodeSource repository
+      ansible.builtin.deb822_repository:
+        name: nodesource
+        types: [deb]
+        uris: "https://deb.nodesource.com/node_{{ node_major }}.x"
+        suites: [nodistro]
+        components: [main]
+        signed_by: /etc/apt/keyrings/nodesource.gpg
+        state: present
+
+    - name: Install Node.js (includes npm), nginx and git
+      ansible.builtin.apt:
+        name: [nodejs, nginx, git]
+        state: present
+        update_cache: true
+
+    # ---------- Application ----------
+    - name: Create unprivileged application user
+      ansible.builtin.user:
+        name: "{{ app_user }}"
+        system: true
+        shell: /usr/sbin/nologin
+        create_home: true
+
+    - name: Create application directory
+      ansible.builtin.file:
+        path: "{{ app_dir }}"
+        state: directory
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+        mode: "0755"
+
+    - name: Clone the repository
+      ansible.builtin.git:
+        repo: "{{ app_repo_url }}"
+        dest: "{{ app_dir }}"
+        version: "{{ app_repo_version }}"
+      become_user: "{{ app_user }}"
+      register: repo
+      notify: Restart backend
+
+    - name: Backend environment file
+      ansible.builtin.template:
+        src: backend.env.j2
+        dest: "{{ app_dir }}/backend/.env"
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+        mode: "0600"
+      no_log: true
+      notify: Restart backend
+
+    - name: Install backend dependencies
+      community.general.npm:
+        path: "{{ app_dir }}/backend"
+        production: true
+      become_user: "{{ app_user }}"
+      notify: Restart backend
+
+    # Same-origin: the browser calls http://<public-ip>/trip and nginx proxies it to the backend.
+    - name: Frontend environment file
+      ansible.builtin.copy:
+        dest: "{{ app_dir }}/frontend/.env"
+        content: "REACT_APP_BACKEND_URL=http://{{ web_public_ip }}\n"
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+        mode: "0644"
+      register: frontend_env
+
+    - name: Install frontend dependencies
+      community.general.npm:
+        path: "{{ app_dir }}/frontend"
+      become_user: "{{ app_user }}"
+      register: frontend_deps
+
+    - name: Check for an existing frontend build
+      ansible.builtin.stat:
+        path: "{{ app_dir }}/frontend/build/index.html"
+      register: build
+
+    - name: Build the React frontend
+      ansible.builtin.command: npm run build
+      args:
+        chdir: "{{ app_dir }}/frontend"
+      environment:
+        CI: "false"
+      become_user: "{{ app_user }}"
+      when: repo.changed or frontend_env.changed or frontend_deps.changed or not build.stat.exists
+      register: build_run
+
+    - name: Create web root
+      ansible.builtin.file:
+        path: "{{ frontend_root }}"
+        state: directory
+        mode: "0755"
+
+    - name: Publish the build to the web root
+      ansible.builtin.command: "rsync -a --delete {{ app_dir }}/frontend/build/ {{ frontend_root }}/"
+      when: build_run is changed
+      changed_when: true
+
+    # ---------- Services ----------
+    - name: Install backend systemd unit
+      ansible.builtin.template:
+        src: travelmemory-backend.service.j2
+        dest: /etc/systemd/system/travelmemory-backend.service
+        mode: "0644"
+      notify: Restart backend
+
+    - name: Enable backend service
+      ansible.builtin.systemd:
+        name: travelmemory-backend
+        enabled: true
+        daemon_reload: true
+
+    - name: Configure nginx site
+      ansible.builtin.template:
+        src: nginx-site.conf.j2
+        dest: /etc/nginx/sites-available/travelmemory
+        mode: "0644"
+      notify: Reload nginx
+
+    - name: Enable nginx site
+      ansible.builtin.file:
+        src: /etc/nginx/sites-available/travelmemory
+        dest: /etc/nginx/sites-enabled/travelmemory
+        state: link
+      notify: Reload nginx
+
+    - name: Disable default nginx site
+      ansible.builtin.file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+      notify: Reload nginx
+
+    - name: Start services
+      ansible.builtin.service:
+        name: "{{ item }}"
+        state: started
+        enabled: true
+      loop: [travelmemory-backend, nginx]
+
+    - name: Apply pending restarts
+      ansible.builtin.meta: flush_handlers
+
+    # ---------- Verification ----------
+    - name: Frontend is served
+      ansible.builtin.uri:
+        url: http://127.0.0.1/
+        status_code: 200
+      retries: 10
+      delay: 3
+      register: fe
+      until: fe.status == 200
+
+    - name: Backend and database are healthy (through nginx)
+      ansible.builtin.uri:
+        url: http://127.0.0.1/health
+        status_code: 200
+      retries: 15
+      delay: 4
+      register: be
+      until: be.status == 200
+
+  handlers:
+    - name: Restart backend
+      ansible.builtin.systemd:
+        name: travelmemory-backend
+        state: restarted
+        daemon_reload: true
+
+    - name: Reload nginx
+      ansible.builtin.service:
+        name: nginx
+        state: reloaded
